@@ -1,18 +1,6 @@
 'use client';
 
-import {
-  CandlestickSeries,
-  ColorType,
-  CrosshairMode,
-  IPriceLine,
-  ISeriesApi,
-  PriceLineOptions,
-  SeriesMarker,
-  Time,
-  UTCTimestamp,
-  createChart,
-} from 'lightweight-charts';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useExchange } from '@/hooks/use-exchange';
 import { useTradingStore } from '@/lib/stores/trading-store';
 import { useMarketStore } from '@/lib/stores/market-store';
@@ -23,7 +11,7 @@ interface CandlestickChartProps {
 }
 
 interface CandlePoint {
-  time: UTCTimestamp;
+  time: number; // unix ms
   open: number;
   high: number;
   low: number;
@@ -55,16 +43,15 @@ function intervalToMs(interval: string): number {
   }
 }
 
-type CandlestickSeriesApi = ISeriesApi<'Candlestick'> & {
-  setMarkers?: (markers: SeriesMarker<Time>[]) => void;
-};
+const CHART_HEIGHT = 420;
+const PADDING_X = 24;
+const PADDING_Y = 16;
 
 export function CandlestickChart({ symbol, interval = '1m' }: CandlestickChartProps) {
   const { adapter } = useExchange();
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const seriesRef = useRef<CandlestickSeriesApi | null>(null);
-  const lastCandleRef = useRef<CandlePoint | null>(null);
-  const priceLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const [dimensions, setDimensions] = useState({ width: 0, height: CHART_HEIGHT });
+  const [candles, setCandles] = useState<CandlePoint[]>([]);
   const intervalMs = useMemo(() => intervalToMs(interval), [interval]);
 
   const ticker = useMarketStore((state) => state.tickers.get(symbol));
@@ -73,200 +60,284 @@ export function CandlestickChart({ symbol, interval = '1m' }: CandlestickChartPr
   );
 
   useEffect(() => {
-    if (!adapter || !containerRef.current) {
+    const element = containerRef.current;
+    if (!element) {
       return;
     }
 
-    const chart = createChart(containerRef.current, {
-      height: 420,
-      layout: {
-        background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: 'var(--text-muted)',
-      },
-      grid: {
-        vertLines: { color: 'rgba(148, 163, 184, 0.1)' },
-        horzLines: { color: 'rgba(148, 163, 184, 0.1)' },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: 'rgba(148, 163, 184, 0.2)' },
-      timeScale: { borderColor: 'rgba(148, 163, 184, 0.2)' },
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        setDimensions({ width, height });
+      }
     });
 
-    const series = chart.addSeries(CandlestickSeries, {
-      upColor: '#16a34a',
-      downColor: '#dc2626',
-      borderVisible: false,
-      wickUpColor: '#16a34a',
-      wickDownColor: '#dc2626',
-    }) as CandlestickSeriesApi;
+    observer.observe(element);
 
-    seriesRef.current = series;
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!adapter) {
+      return;
+    }
 
     let cancelled = false;
 
-    async function loadCandles() {
+    (async () => {
       try {
-        const candles = await adapter!.rest.getCandles(symbol, interval, 500);
+        const response = await adapter.rest.getCandles(symbol, interval, 200);
         if (cancelled) {
           return;
         }
 
-        const formatted = candles.map((candle) => ({
-          time: Math.floor(candle.timestamp / 1000) as UTCTimestamp,
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-        }));
+        const formatted = response
+          .map((candle) => ({
+            time: candle.timestamp,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          }))
+          .sort((a, b) => a.time - b.time);
 
-        series.setData(formatted);
-        lastCandleRef.current =
-          formatted.length > 0 ? formatted[formatted.length - 1] : null;
+        setCandles(formatted);
       } catch (error) {
         console.error('Failed to load candles', error);
       }
-    }
-
-    loadCandles();
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width } = entry.contentRect;
-        chart.applyOptions({ width });
-      }
-    });
-
-    resizeObserver.observe(containerRef.current);
+    })();
 
     return () => {
       cancelled = true;
-      resizeObserver.disconnect();
-      chart.remove();
-      seriesRef.current = null;
-      lastCandleRef.current = null;
-      priceLinesRef.current.clear();
     };
   }, [adapter, interval, symbol]);
 
   useEffect(() => {
-    if (!ticker || !seriesRef.current) {
+    if (!ticker) {
       return;
     }
 
-    const now = ticker.timestamp ?? Date.now();
     const price = ticker.last;
-    const existing = lastCandleRef.current;
-    const candleTime = Math.floor(now / 1000) as UTCTimestamp;
+    const now = ticker.timestamp ?? Date.now();
+    const bucketStart = Math.floor(now / intervalMs) * intervalMs;
 
-    if (!existing) {
-      const freshCandle: CandlePoint = {
-        time: candleTime,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-      };
-      lastCandleRef.current = freshCandle;
-      seriesRef.current.update(freshCandle);
-      return;
-    }
-
-    const existingMs = (existing.time as number) * 1000;
-
-    if (now - existingMs >= intervalMs) {
-      const newCandle: CandlePoint = {
-        time: candleTime,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-      };
-      lastCandleRef.current = newCandle;
-      seriesRef.current.update(newCandle);
-      return;
-    }
-
-    const updated: CandlePoint = {
-      ...existing,
-      close: price,
-      high: Math.max(existing.high, price),
-      low: Math.min(existing.low, price),
-    };
-
-    lastCandleRef.current = updated;
-    seriesRef.current.update(updated);
-  }, [intervalMs, ticker]);
-
-  useEffect(() => {
-    if (!seriesRef.current) {
-      return;
-    }
-
-    const markers: SeriesMarker<Time>[] = openPositions.map((position) => ({
-      time: Math.floor(position.openedAt / 1000) as UTCTimestamp,
-      position: position.side === 'long' ? 'belowBar' : 'aboveBar',
-      color: position.side === 'long' ? '#16a34a' : '#dc2626',
-      shape: position.side === 'long' ? 'arrowUp' : 'arrowDown',
-      text: `${position.side === 'long' ? 'Long' : 'Short'} ${position.quantity} @ ${position.entryPrice.toFixed(2)}`,
-    }));
-
-    if (seriesRef.current?.setMarkers) {
-      seriesRef.current.setMarkers(markers);
-    }
-  }, [openPositions]);
-
-  useEffect(() => {
-    if (!seriesRef.current) {
-      return;
-    }
-
-    const series = seriesRef.current;
-    const priceLines = priceLinesRef.current;
-    const activeIds = new Set(openPositions.map((position) => position.id));
-
-    for (const [positionId, line] of Array.from(priceLines.entries())) {
-      if (!activeIds.has(positionId)) {
-        series.removePriceLine(line);
-        priceLines.delete(positionId);
+    setCandles((prev) => {
+      if (prev.length === 0) {
+        return [
+          {
+            time: bucketStart,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+          },
+        ];
       }
-    }
 
-    const formatPnl = (value: number) => {
-      const sign = value > 0 ? '+' : '';
-      return `${sign}${value.toFixed(2)}`;
-    };
+      const last = prev[prev.length - 1];
 
-    const buildTitle = (positionUnrealized: number, positionPercent: number, side: 'long' | 'short') => {
-      const sideLabel = side === 'long' ? 'Long' : 'Short';
-      const pnlText = formatPnl(positionUnrealized);
-      const pctText = formatPnl(positionPercent);
-      return `${sideLabel} • ${pctText}% (${pnlText})`;
-    };
+      if (bucketStart > last.time) {
+        const next = [
+          ...prev.slice(Math.max(0, prev.length - 199)),
+          {
+            time: bucketStart,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+          },
+        ];
+        return next;
+      }
 
-    openPositions.forEach((position) => {
-      const color = position.side === 'long' ? '#16a34a' : '#dc2626';
-      const options: PriceLineOptions = {
-        price: position.entryPrice,
-        color,
-        lineWidth: 2,
-        lineStyle: 0,
-        lineVisible: true,
-        axisLabelVisible: true,
-        axisLabelColor: color,
-        axisLabelTextColor: '#ffffff',
-        title: buildTitle(position.unrealizedPnl, position.pnlPercent, position.side),
+      const updated = {
+        ...last,
+        close: price,
+        high: Math.max(last.high, price),
+        low: Math.min(last.low, price),
       };
 
-      const existingLine = priceLines.get(position.id);
-
-      if (existingLine) {
-        existingLine.applyOptions(options);
-      } else {
-        const createdLine = series.createPriceLine(options);
-        priceLines.set(position.id, createdLine);
-      }
+      return [...prev.slice(0, -1), updated];
     });
-  }, [openPositions]);
+  }, [ticker, intervalMs]);
 
-  return <div ref={containerRef} className="h-[420px] w-full" />;
+  const chartWidth = Math.max(dimensions.width, 0);
+  const chartHeight = dimensions.height || CHART_HEIGHT;
+  const drawableWidth = Math.max(chartWidth - PADDING_X * 2, 1);
+  const drawableHeight = Math.max(chartHeight - PADDING_Y * 2, 1);
+
+  const priceDomain = useMemo(() => {
+    if (candles.length === 0) {
+      return { min: 0, max: 1 };
+    }
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+
+    for (const candle of candles) {
+      min = Math.min(min, candle.low);
+      max = Math.max(max, candle.high);
+    }
+
+    for (const position of openPositions) {
+      min = Math.min(min, position.entryPrice);
+      max = Math.max(max, position.entryPrice);
+    }
+
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+      const price = candles[candles.length - 1].close;
+      const padding = Math.max(price * 0.002, 1);
+      return { min: price - padding, max: price + padding };
+    }
+
+    const padding = (max - min) * 0.05;
+    return { min: min - padding, max: max + padding };
+  }, [candles, openPositions]);
+
+  const firstTime = candles[0]?.time ?? 0;
+  const lastTime = candles[candles.length - 1]?.time ?? firstTime;
+  const timeRange = Math.max(lastTime - firstTime, intervalMs);
+
+  const scaleY = (value: number) => {
+    const clamped = Math.min(Math.max(value, priceDomain.min), priceDomain.max);
+    const ratio = (clamped - priceDomain.min) / (priceDomain.max - priceDomain.min || 1);
+    return chartHeight - PADDING_Y - ratio * drawableHeight;
+  };
+
+  const timeToX = (time: number) => {
+    if (candles.length <= 1) {
+      return PADDING_X + drawableWidth / 2;
+    }
+
+    const ratio = (time - firstTime) / (timeRange || 1);
+    return PADDING_X + Math.min(Math.max(ratio, 0), 1) * drawableWidth;
+  };
+
+  const step = candles.length > 1 ? drawableWidth / (candles.length - 1) : drawableWidth;
+  const candleWidth = Math.max(Math.min(step * 0.6, 22), 3);
+
+  const formatNumber = (value: number) => {
+    return value.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
+  if (candles.length === 0) {
+    return (
+      <div
+        ref={containerRef}
+        className="flex h-[420px] items-center justify-center text-sm text-text-muted"
+      >
+        Loading chart...
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="relative h-[420px] w-full">
+      <svg width={chartWidth} height={chartHeight} role="img" aria-label={`${symbol} price chart`}>
+        <rect
+          x={0}
+          y={0}
+          width={chartWidth}
+          height={chartHeight}
+          fill="transparent"
+        />
+
+        {candles.map((candle, index) => {
+          const xCenter = timeToX(candle.time);
+          const x = xCenter - candleWidth / 2;
+          const yHigh = scaleY(candle.high);
+          const yLow = scaleY(candle.low);
+          const yOpen = scaleY(candle.open);
+          const yClose = scaleY(candle.close);
+          const isUp = candle.close >= candle.open;
+          const bodyTop = Math.min(yOpen, yClose);
+          const bodyHeight = Math.max(Math.abs(yClose - yOpen), 1);
+          const color = isUp ? '#16a34a' : '#dc2626';
+
+          return (
+            <g key={candle.time ?? index}>
+              <line
+                x1={xCenter}
+                x2={xCenter}
+                y1={yHigh}
+                y2={yLow}
+                stroke={color}
+                strokeWidth={1}
+                strokeLinecap="round"
+              />
+              <rect
+                x={x}
+                y={bodyTop}
+                width={candleWidth}
+                height={bodyHeight}
+                fill={color}
+                rx={1.5}
+              />
+            </g>
+          );
+        })}
+
+        {openPositions.map((position) => {
+          const y = scaleY(position.entryPrice);
+          const color = position.side === 'long' ? '#16a34a' : '#dc2626';
+          const markerX = timeToX(position.openedAt);
+          const triangleHeight = 10;
+          const triangleWidth = 10;
+          const markerPath =
+            position.side === 'long'
+              ? `M ${markerX} ${y - triangleHeight} L ${markerX - triangleWidth / 2} ${y} L ${markerX +
+                  triangleWidth / 2} ${y} Z`
+              : `M ${markerX} ${y + triangleHeight} L ${markerX - triangleWidth / 2} ${y} L ${markerX +
+                  triangleWidth / 2} ${y} Z`;
+
+          const pnlSign = position.unrealizedPnl >= 0 ? '+' : '';
+          const percentSign = position.pnlPercent >= 0 ? '+' : '';
+          const label = `${position.side === 'long' ? 'Long' : 'Short'} • ${percentSign}${position.pnlPercent.toFixed(
+            2
+          )}% (${pnlSign}${position.unrealizedPnl.toFixed(2)})`;
+
+          return (
+            <g key={position.id}>
+              <line
+                x1={PADDING_X}
+                x2={chartWidth - PADDING_X}
+                y1={y}
+                y2={y}
+                stroke={color}
+                strokeWidth={1.5}
+                strokeDasharray="4 4"
+                opacity={0.7}
+              />
+              <path d={markerPath} fill={color} opacity={0.85} />
+              <text
+                x={chartWidth - PADDING_X - 6}
+                y={y - 6}
+                textAnchor="end"
+                fontSize={12}
+                fill={color}
+                fontWeight={600}
+              >
+                {label}
+              </text>
+            </g>
+          );
+        })}
+
+        <text
+          x={chartWidth - PADDING_X}
+          y={PADDING_Y + 12}
+          textAnchor="end"
+          fontSize={12}
+          fill="#4B5563"
+        >
+          Last: ${formatNumber(candles[candles.length - 1].close)}
+        </text>
+      </svg>
+    </div>
+  );
 }
