@@ -289,6 +289,16 @@ export class CoinbaseAdapter implements ExchangeAdapter {
     try {
       this.metrics.messagesReceived++;
       const message = JSON.parse(data);
+      const now = Date.now();
+
+      if (typeof message === 'object' && message !== null && 'time' in message) {
+        const eventTime = new Date((message as { time: string }).time).getTime();
+        if (!Number.isNaN(eventTime)) {
+          this.metrics.latency = Math.max(0, now - eventTime);
+        }
+      }
+
+      this.metrics.lastHeartbeat = now;
 
       if (message.type === 'ticker') {
         this.handleTickerMessage(message as CoinbaseTickerMessage);
