@@ -5,14 +5,15 @@ import { useParams } from 'next/navigation';
 import { NeumorphCard } from '@/components/ui/neumorph-card';
 import { NeumoButton } from '@/components/ui/neumo-button';
 import { useExchange } from '@/hooks/use-exchange';
+import { usePaperTradingEngine } from '@/hooks/use-paper-trading-engine';
 import { useMarketStore } from '@/lib/stores/market-store';
-import { useTradingStore } from '@/lib/stores/trading-store';
+import { useTradingStore, type Order } from '@/lib/stores/trading-store';
 import { useExchangeStore } from '@/lib/stores/exchange-store';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
-import Decimal from 'decimal.js';
+import { CandlestickChart } from '@/components/charts/candlestick-chart';
 
 export default function TradePage() {
   const params = useParams();
@@ -20,16 +21,29 @@ export default function TradePage() {
 
   const { adapter } = useExchange();
   const { tickers, orderBooks, recentTrades } = useMarketStore();
-  const { isPaperMode, liveTradingEnabled, addOrder } = useTradingStore();
+  const { isPaperMode, liveTradingEnabled, addOrder, closePosition, orders, positions } =
+    useTradingStore((state) => ({
+      isPaperMode: state.isPaperMode,
+      liveTradingEnabled: state.liveTradingEnabled,
+      addOrder: state.addOrder,
+      closePosition: state.closePosition,
+      orders: state.orders,
+      positions: state.positions,
+    }));
   const { isConnected } = useExchangeStore();
 
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
   const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
+  const [stopLoss, setStopLoss] = useState('');
+  const [takeProfit, setTakeProfit] = useState('');
+  const [leverage, setLeverage] = useState('1');
 
   const ticker = tickers.get(symbol);
   const orderBook = orderBooks.get(symbol);
   const trades = recentTrades.get(symbol) || [];
+
+  usePaperTradingEngine(symbol);
 
   useEffect(() => {
     if (!adapter || !isConnected) return;
@@ -47,17 +61,42 @@ export default function TradePage() {
     };
   }, [adapter, isConnected, symbol]);
 
-  const handleTrade = (side: 'buy' | 'sell') => {
-    if (!quantity || (orderType === 'limit' && !price)) return;
+  const relevantPositions = positions.filter(
+    (position) => position.symbol === symbol && position.isPaper === isPaperMode
+  );
 
-    const order = {
+  const relevantOrders = orders.filter(
+    (order) => order.symbol === symbol && order.isPaper === isPaperMode
+  );
+
+  const handleTrade = (side: 'buy' | 'sell') => {
+    if (!ticker) return;
+
+    const parsedQuantity = Number(quantity);
+    const parsedPrice = Number(price);
+    const parsedStop = stopLoss ? Number(stopLoss) : undefined;
+    const parsedTake = takeProfit ? Number(takeProfit) : undefined;
+    const parsedLeverage = Math.max(1, Number(leverage) || 1);
+
+    if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+      return;
+    }
+
+    if (orderType === 'limit' && (!Number.isFinite(parsedPrice) || parsedPrice <= 0)) {
+      return;
+    }
+
+    const order: Order = {
       id: crypto.randomUUID(),
       symbol,
       side,
       type: orderType,
-      quantity: parseFloat(quantity),
-      price: orderType === 'limit' ? parseFloat(price) : undefined,
-      status: 'pending' as const,
+      quantity: parsedQuantity,
+      price: orderType === 'limit' ? parsedPrice : undefined,
+      stopLoss: parsedStop,
+      takeProfit: parsedTake,
+      leverage: parsedLeverage,
+      status: 'pending',
       filledQuantity: 0,
       averageFillPrice: 0,
       isPaper: isPaperMode,
@@ -65,8 +104,12 @@ export default function TradePage() {
     };
 
     addOrder(order);
+    useTradingStore.getState().processPaperTick(symbol, ticker.last);
+
     setQuantity('');
     setPrice('');
+    setStopLoss('');
+    setTakeProfit('');
   };
 
   const formatNumber = (num: number, decimals = 2) => {
@@ -133,6 +176,10 @@ export default function TradePage() {
               </div>
             </div>
           </div>
+        </NeumorphCard>
+
+        <NeumorphCard className="bg-elevated p-0">
+          <CandlestickChart symbol={symbol} interval="1m" />
         </NeumorphCard>
 
         {orderBook && (
@@ -233,6 +280,44 @@ export default function TradePage() {
               )}
 
               <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="stopLoss">Stop Loss</Label>
+                  <Input
+                    id="stopLoss"
+                    type="number"
+                    step="0.01"
+                    value={stopLoss}
+                    onChange={(e) => setStopLoss(e.target.value)}
+                    placeholder="Optional"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="takeProfit">Take Profit</Label>
+                  <Input
+                    id="takeProfit"
+                    type="number"
+                    step="0.01"
+                    value={takeProfit}
+                    onChange={(e) => setTakeProfit(e.target.value)}
+                    placeholder="Optional"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="leverage">Leverage</Label>
+                <Input
+                  id="leverage"
+                  type="number"
+                  min={1}
+                  max={100}
+                  step="1"
+                  value={leverage}
+                  onChange={(e) => setLeverage(e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <NeumoButton
                   variant="primary"
                   onClick={() => handleTrade('buy')}
@@ -281,6 +366,140 @@ export default function TradePage() {
               </div>
             ))}
           </div>
+        </NeumorphCard>
+
+        <NeumorphCard className="bg-elevated p-6">
+          <h2 className="mb-4 text-lg font-semibold text-text">Open Positions</h2>
+          {relevantPositions.length === 0 ? (
+            <p className="text-sm text-text-muted">No open positions</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-surface text-left text-text-muted">
+                    <th className="pb-2">Side</th>
+                    <th className="pb-2 text-right">Qty</th>
+                    <th className="pb-2 text-right">Entry</th>
+                    <th className="pb-2 text-right">Last</th>
+                    <th className="pb-2 text-right">PnL ($)</th>
+                    <th className="pb-2 text-right">PnL (%)</th>
+                    <th className="pb-2 text-right">SL / TP</th>
+                    <th className="pb-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {relevantPositions.map((position) => (
+                    <tr key={position.id} className="border-b border-surface/50">
+                      <td
+                        className={cn(
+                          'py-2 font-medium',
+                          position.side === 'long' ? 'text-up' : 'text-down'
+                        )}
+                      >
+                        {position.side.toUpperCase()}
+                      </td>
+                      <td className="py-2 text-right font-mono text-text">
+                        {formatNumber(position.quantity, 4)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-text">
+                        ${formatNumber(position.entryPrice)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-text">
+                        ${formatNumber(position.currentPrice)}
+                      </td>
+                      <td
+                        className={cn(
+                          'py-2 text-right font-mono',
+                          position.unrealizedPnl >= 0 ? 'text-up' : 'text-down'
+                        )}
+                      >
+                        ${formatNumber(position.unrealizedPnl)}
+                      </td>
+                      <td
+                        className={cn(
+                          'py-2 text-right font-mono',
+                          position.pnlPercent >= 0 ? 'text-up' : 'text-down'
+                        )}
+                      >
+                        {formatNumber(position.pnlPercent)}%
+                      </td>
+                      <td className="py-2 text-right text-xs text-text-muted">
+                        {position.stopLoss ? `SL ${formatNumber(position.stopLoss)}` : '—'}
+                        <br />
+                        {position.takeProfit
+                          ? `TP ${formatNumber(position.takeProfit)}`
+                          : '—'}
+                      </td>
+                      <td className="py-2 text-right">
+                        <NeumoButton
+                          variant="ghost"
+                          onClick={() =>
+                            ticker && closePosition(position.id, ticker.last, 'manual')
+                          }
+                        >
+                          Close
+                        </NeumoButton>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </NeumorphCard>
+
+        <NeumorphCard className="bg-elevated p-6">
+          <h2 className="mb-4 text-lg font-semibold text-text">Orders</h2>
+          {relevantOrders.length === 0 ? (
+            <p className="text-sm text-text-muted">No orders placed</p>
+          ) : (
+            <div className="space-y-3">
+              {relevantOrders.map((order) => (
+                <div
+                  key={order.id}
+                  className="rounded-lg border border-surface/60 bg-surface/50 p-4"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-text-muted">
+                      {new Date(order.createdAt).toLocaleTimeString()}
+                    </div>
+                    <span
+                      className={cn(
+                        'text-sm font-medium',
+                        order.side === 'buy' ? 'text-up' : 'text-down'
+                      )}
+                    >
+                      {order.side === 'buy' ? 'LONG' : 'SHORT'}
+                    </span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-4 text-sm">
+                    <div className="space-y-1">
+                      <div className="text-text-muted">Type</div>
+                      <div className="font-mono text-text">{order.type.toUpperCase()}</div>
+                    </div>
+                    <div className="space-y-1 text-right">
+                      <div className="text-text-muted">Quantity</div>
+                      <div className="font-mono text-text">
+                        {formatNumber(order.quantity, 4)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-text-muted">Price</div>
+                      <div className="font-mono text-text">
+                        {order.type === 'market'
+                          ? 'Market'
+                          : `$${formatNumber(order.price ?? 0)}`}
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-right">
+                      <div className="text-text-muted">Status</div>
+                      <div className="font-mono text-text">{order.status}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </NeumorphCard>
       </div>
     </div>
