@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useExchangeStore } from '@/lib/stores/exchange-store';
 import { useMarketStore } from '@/lib/stores/market-store';
 import { getExchangeAdapter } from '@/lib/exchanges';
@@ -12,6 +12,9 @@ export function useExchange() {
   const { setTicker, setOrderBook, addTrade, resetMarketData } =
     useMarketStore();
   const adapterRef = useRef<ExchangeAdapter | null>(null);
+  const [currentAdapter, setCurrentAdapter] = useState<ExchangeAdapter | null>(
+    null
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -19,6 +22,7 @@ export function useExchange() {
 
     const adapter = getExchangeAdapter(selectedExchange);
     adapterRef.current = adapter;
+    setCurrentAdapter(adapter);
     resetMarketData();
     setIsConnected(false);
 
@@ -74,6 +78,7 @@ export function useExchange() {
       adapterRef.current = null;
       setIsConnected(false);
       resetMarketData();
+      setCurrentAdapter((existing) => (existing === adapter ? null : existing));
     };
   }, [
     selectedExchange,
@@ -87,6 +92,6 @@ export function useExchange() {
   ]);
 
   return {
-    adapter: adapterRef.current,
+    adapter: currentAdapter,
   };
 }
