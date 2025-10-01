@@ -15,6 +15,7 @@ interface MarketState {
   addSelectedSymbol: (symbol: string) => void;
   removeSelectedSymbol: (symbol: string) => void;
   clearSelectedSymbols: () => void;
+  resetMarketData: () => void;
 }
 
 export const useMarketStore = create<MarketState>((set) => ({
@@ -64,4 +65,13 @@ export const useMarketStore = create<MarketState>((set) => ({
     }),
 
   clearSelectedSymbols: () => set({ selectedSymbols: new Set() }),
+
+  resetMarketData: () =>
+    set({
+      tickers: new Map(),
+      orderBooks: new Map(),
+      recentTrades: new Map(),
+      instruments: [],
+      selectedSymbols: new Set(),
+    }),
 }));

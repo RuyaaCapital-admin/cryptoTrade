@@ -9,55 +9,82 @@ import { ExchangeAdapter } from '@/lib/exchanges/types';
 export function useExchange() {
   const { selectedExchange, registerAdapter, setIsConnected, updateMetrics } =
     useExchangeStore();
-  const { setTicker, setOrderBook, addTrade } = useMarketStore();
+  const { setTicker, setOrderBook, addTrade, resetMarketData } =
+    useMarketStore();
   const adapterRef = useRef<ExchangeAdapter | null>(null);
-  const isInitialized = useRef(false);
 
   useEffect(() => {
-    if (isInitialized.current) return;
+    let cancelled = false;
+    let metricsInterval: NodeJS.Timeout | null = null;
 
-    async function initializeExchange() {
+    const adapter = getExchangeAdapter(selectedExchange);
+    adapterRef.current = adapter;
+    resetMarketData();
+    setIsConnected(false);
+
+    adapter.onTicker((ticker) => {
+      if (!cancelled) {
+        setTicker(ticker);
+      }
+    });
+
+    adapter.onOrderBook((orderBook) => {
+      if (!cancelled) {
+        setOrderBook(orderBook);
+      }
+    });
+
+    adapter.onTrade((trade) => {
+      if (!cancelled) {
+        addTrade(trade);
+      }
+    });
+
+    async function connect() {
       try {
-        const adapter = getExchangeAdapter(selectedExchange);
-        adapterRef.current = adapter;
-
-        adapter.onTicker((ticker) => {
-          setTicker(ticker);
-        });
-
-        adapter.onOrderBook((orderBook) => {
-          setOrderBook(orderBook);
-        });
-
-        adapter.onTrade((trade) => {
-          addTrade(trade);
-        });
-
         await adapter.wsConnect();
-        setIsConnected(true);
+        if (cancelled) {
+          return;
+        }
         registerAdapter(selectedExchange, adapter);
+        setIsConnected(true);
+        updateMetrics(selectedExchange, adapter.getMetrics());
 
-        const metricsInterval = setInterval(() => {
-          if (adapter.isConnected()) {
+        metricsInterval = setInterval(() => {
+          if (!cancelled && adapter.isConnected()) {
             updateMetrics(selectedExchange, adapter.getMetrics());
           }
         }, 5000);
-
-        isInitialized.current = true;
-
-        return () => {
-          clearInterval(metricsInterval);
-          adapter.wsDisconnect();
-          setIsConnected(false);
-        };
       } catch (error) {
-        console.error('Failed to initialize exchange:', error);
-        setIsConnected(false);
+        if (!cancelled) {
+          console.error('Failed to initialize exchange:', error);
+          setIsConnected(false);
+        }
       }
     }
 
-    initializeExchange();
-  }, [selectedExchange, registerAdapter, setIsConnected, updateMetrics, setTicker, setOrderBook, addTrade]);
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (metricsInterval) {
+        clearInterval(metricsInterval);
+      }
+      adapter.wsDisconnect();
+      adapterRef.current = null;
+      setIsConnected(false);
+      resetMarketData();
+    };
+  }, [
+    selectedExchange,
+    registerAdapter,
+    setIsConnected,
+    updateMetrics,
+    setTicker,
+    setOrderBook,
+    addTrade,
+    resetMarketData,
+  ]);
 
   return {
     adapter: adapterRef.current,

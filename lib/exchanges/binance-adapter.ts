@@ -13,6 +13,7 @@ import {
 interface BinanceTickerMessage {
   e: string;
   s: string;
+  E: number;
   c: string;
   o: string;
   h: string;
@@ -27,6 +28,7 @@ interface BinanceTickerMessage {
 interface BinanceDepthMessage {
   e: string;
   s: string;
+  E: number;
   b: [string, string][];
   a: [string, string][];
 }
@@ -34,6 +36,7 @@ interface BinanceDepthMessage {
 interface BinanceTradeMessage {
   e: string;
   s: string;
+  E: number;
   p: string;
   q: string;
   m: boolean;
@@ -296,6 +299,16 @@ export class BinanceAdapter implements ExchangeAdapter {
     try {
       this.metrics.messagesReceived++;
       const message = JSON.parse(data);
+      const now = Date.now();
+
+      if (typeof message === 'object' && message !== null && 'E' in message) {
+        const eventTime = Number((message as { E: number }).E);
+        if (!Number.isNaN(eventTime) && eventTime > 0) {
+          this.metrics.latency = Math.max(0, now - eventTime);
+        }
+      }
+
+      this.metrics.lastHeartbeat = now;
 
       if (message.e === '24hrTicker') {
         this.handleTickerMessage(message as BinanceTickerMessage);
@@ -319,7 +332,7 @@ export class BinanceAdapter implements ExchangeAdapter {
       low24h: parseFloat(message.l),
       bid: parseFloat(message.b),
       ask: parseFloat(message.a),
-      timestamp: Date.now(),
+      timestamp: message.E || Date.now(),
     };
 
     this.tickerCallbacks.forEach((cb) => cb(ticker));
@@ -336,7 +349,7 @@ export class BinanceAdapter implements ExchangeAdapter {
         price: parseFloat(price),
         quantity: parseFloat(quantity),
       })),
-      timestamp: Date.now(),
+      timestamp: message.E || Date.now(),
     };
 
     this.orderBookCallbacks.forEach((cb) => cb(orderBook));
